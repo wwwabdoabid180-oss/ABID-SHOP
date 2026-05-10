@@ -1,0 +1,249 @@
+const crypto = require("crypto");
+
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  delay
+} = require("@whiskeysockets/baileys");
+
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const pino = require("pino");
+const fs = require("fs-extra");
+const dotenv = require("dotenv");
+
+dotenv.config();
+
+const OWNER_NUMBER = process.env.OWNER_NUMBER;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+const DB_FILE = "./abid_shop_db.json";
+
+if (!fs.existsSync(DB_FILE)) {
+  fs.writeJsonSync(DB_FILE, {
+    settings: {
+      autoReply: true
+    },
+    customers: {}
+  });
+}
+
+let db = fs.readJsonSync(DB_FILE);
+
+const saveDB = () => {
+  fs.writeJsonSync(DB_FILE, db);
+};
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-1.5-flash",
+  systemInstruction: `
+أنت موظف حقيقي لمتجر ABID SHOP 😈🔥
+
+تتحدث بالدارجة المغربية بشكل طبيعي جداً.
+
+الخدمات:
+- حسابات Free Fire
+- شحن جواهر
+- خدمات AI
+- تصاميم
+- خدمات سوشيال ميديا
+
+إذا قال الزبون:
+بغيت نبيع كونط
+
+جاوب:
+صيفط التصاور والثمن اللي باغي 😈
+
+جاوب باحترافية وباختصار.
+`
+});
+
+async function startBot() {
+
+  const { state, saveCreds } =
+    await useMultiFileAuthState("./session");
+
+  const { version } =
+    await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(
+        state.keys,
+        pino({ level: "silent" })
+      )
+    },
+
+    browser: ["ABID SHOP 😈", "Safari", "1.0"]
+  });
+
+  if (!sock.authState.creds.registered) {
+
+    setTimeout(async () => {
+
+      const code =
+        await sock.requestPairingCode(OWNER_NUMBER);
+
+      console.log(`
+============================
+
+😈 ABID SHOP PAIRING CODE
+
+${code}
+
+============================
+      `);
+
+    }, 3000);
+  }
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", async (update) => {
+
+    const { connection, lastDisconnect } = update;
+
+    if (connection === "close") {
+
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !==
+        DisconnectReason.loggedOut;
+
+      if (shouldReconnect) {
+        console.log("🔄 reconnecting...");
+        startBot();
+      }
+
+    } else if (connection === "open") {
+
+      console.log("✅ ABID SHOP BOT ONLINE 😈🔥");
+
+    }
+
+  });
+
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+
+    try {
+
+      const m = messages[0];
+
+      if (!m.message) return;
+      if (m.key.fromMe) return;
+
+      const jid = m.key.remoteJid;
+
+      const sender =
+        jid.split("@")[0];
+
+      const text =
+        m.message.conversation ||
+        m.message.extendedTextMessage?.text ||
+        "";
+
+      if (!text) return;
+
+      const isOwner =
+        sender === OWNER_NUMBER;
+
+      // OWNER COMMANDS
+
+      if (isOwner) {
+
+        if (
+          text.toLowerCase() === "owner" ||
+          text.toLowerCase() === "boss" ||
+          text === "انا المالك"
+        ) {
+
+          return await sock.sendMessage(jid, {
+            text: "🔥😈 أمرك مالك"
+          });
+
+        }
+
+        if (text === ".ping") {
+
+          return await sock.sendMessage(jid, {
+            text: "🏓 pong"
+          });
+
+        }
+
+        if (text === ".menu") {
+
+          return await sock.sendMessage(jid, {
+            text:
+`😈🔥 ABID SHOP MENU
+
+.ping
+.menu
+.uptime
+.restart`
+          });
+
+        }
+
+        if (text === ".uptime") {
+
+          const uptime =
+            process.uptime();
+
+          return await sock.sendMessage(jid, {
+            text: `⏱️ ${Math.floor(uptime)}s`
+          });
+
+        }
+
+      }
+
+      if (!db.customers[jid]) {
+        db.customers[jid] = {
+          history: []
+        };
+      }
+
+      await sock.sendPresenceUpdate(
+        "composing",
+        jid
+      );
+
+      await delay(1500);
+
+      const result =
+        await model.generateContent(text);
+
+      const response =
+        result.response.text();
+
+      await sock.sendMessage(jid, {
+        text: response
+      });
+
+      db.customers[jid].history.push({
+        user: text,
+        bot: response
+      });
+
+      saveDB();
+
+    } catch (err) {
+
+      console.log("ERROR:", err);
+
+    }
+
+  });
+
+}
+
+startBot();
